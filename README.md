@@ -6,7 +6,7 @@ A Red-Discord Bot cog that monitors membership applications and notifies specifi
 
 1. Add this repository to your Red-bot:
    ```
-   [p]repo add submittedapplicationmonitor https://github.com/yourusername/SubmittedApplicationMonitor
+   [p]repo add submittedapplicationmonitor https://github.com/cnabel/SubmittedApplicationMonitor
    ```
 
 2. Install the cog:
