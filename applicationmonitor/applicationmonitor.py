@@ -179,6 +179,3 @@ class ApplicationMonitor(commands.Cog):
                 log.info(f"Sent approval notification for {after} in {after.guild.name}")
             except Exception as e:
                 log.error(f"Error sending approval notification: {e}")
-
-# This setup function is moved to __init__.py
-# The cog class above should be saved as applicationmonitor/applicationmonitor.py
