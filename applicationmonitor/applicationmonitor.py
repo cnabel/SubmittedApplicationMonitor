@@ -5,6 +5,7 @@ from redbot.core.utils.chat_formatting import box
 import logging
 from collections import deque
 from datetime import datetime
+import asyncio
 
 log = logging.getLogger("red.applicationmonitor")
 
@@ -23,10 +24,22 @@ class ApplicationMonitor(commands.Cog):
             "notification_channel": None,
             "notification_role": None,
             "enabled": False,
-            "debug": False
+            "debug": False,
+            "check_interval": 60  # Check every 60 seconds for pending members
         }
         
         self.config.register_guild(**default_guild)
+        
+        # Track known pending members to detect new applications
+        self.known_pending = {}
+        
+        # Start the background task
+        self.check_task = asyncio.create_task(self.periodic_check())
+    
+    def cog_unload(self):
+        """Clean up when cog is unloaded."""
+        if hasattr(self, 'check_task'):
+            self.check_task.cancel()
     
     def add_log(self, guild_id: int, message: str, level: str = "INFO"):
         """Add a log entry for a specific guild."""
@@ -44,6 +57,100 @@ class ApplicationMonitor(commands.Cog):
             log.warning(message)
         else:
             log.info(message)
+    
+    async def periodic_check(self):
+        """Periodically check for new pending members."""
+        await self.bot.wait_until_ready()
+        
+        while not self.bot.is_closed():
+            try:
+                for guild in self.bot.guilds:
+                    guild_config = await self.config.guild(guild).all()
+                    
+                    if not guild_config["enabled"]:
+                        continue
+                    
+                    # Check for pending members
+                    await self.check_pending_members(guild)
+                    
+                # Wait for the configured interval
+                await asyncio.sleep(60)  # Check every minute
+                
+            except Exception as e:
+                log.error(f"Error in periodic check: {e}")
+                await asyncio.sleep(60)
+    
+    async def check_pending_members(self, guild):
+        """Check for new pending members in a guild."""
+        try:
+            guild_config = await self.config.guild(guild).all()
+            
+            if not guild_config["enabled"]:
+                return
+            
+            # Get current pending members
+            pending_members = [member for member in guild.members if member.pending]
+            current_pending_ids = {member.id for member in pending_members}
+            
+            # Get previously known pending members for this guild
+            known_pending_ids = self.known_pending.get(guild.id, set())
+            
+            # Find new pending members
+            new_pending_ids = current_pending_ids - known_pending_ids
+            
+            if new_pending_ids:
+                self.add_log(guild.id, f"Found {len(new_pending_ids)} new pending members")
+                
+                for member_id in new_pending_ids:
+                    member = guild.get_member(member_id)
+                    if member:
+                        await self.notify_new_application(member, guild_config)
+            
+            # Update known pending members
+            self.known_pending[guild.id] = current_pending_ids
+            
+            if guild_config["debug"]:
+                self.add_log(guild.id, f"Periodic check: {len(current_pending_ids)} pending members total")
+                
+        except Exception as e:
+            self.add_log(guild.id, f"Error checking pending members: {e}", "ERROR")
+    
+    async def notify_new_application(self, member, guild_config):
+        """Send notification for a new application."""
+        channel_id = guild_config["notification_channel"]
+        role_id = guild_config["notification_role"]
+        
+        if not channel_id or not role_id:
+            self.add_log(member.guild.id, f"Notification config missing for new application from {member}")
+            return
+        
+        channel = member.guild.get_channel(channel_id)
+        role = member.guild.get_role(role_id)
+        
+        if not channel or not role:
+            self.add_log(member.guild.id, f"Invalid channel or role for new application from {member}")
+            return
+        
+        # Create notification message
+        embed = discord.Embed(
+            title="🔔 New Membership Application",
+            description=f"**{member.mention}** has applied to join the server and is pending approval.",
+            color=discord.Color.blue(),
+            timestamp=member.joined_at or datetime.utcnow()
+        )
+        
+        embed.add_field(name="User", value=f"{member} ({member.id})", inline=True)
+        embed.add_field(name="Account Created", value=member.created_at.strftime("%Y-%m-%d %H:%M:%S"), inline=True)
+        embed.add_field(name="Status", value="⏳ Pending Approval", inline=True)
+        
+        if member.avatar:
+            embed.set_thumbnail(url=member.avatar.url)
+        
+        try:
+            await channel.send(f"{role.mention} - New application received!", embed=embed)
+            self.add_log(member.guild.id, f"Sent application notification for {member} to {channel.name}")
+        except Exception as e:
+            self.add_log(member.guild.id, f"Error sending application notification: {e}", "ERROR")
     
     @commands.group()
     @commands.guild_only()
@@ -80,6 +187,12 @@ class ApplicationMonitor(commands.Cog):
         await self.config.guild(ctx.guild).enabled.set(not current)
         status = "enabled" if not current else "disabled"
         await ctx.send(f"Application monitoring has been {status}.")
+        
+        if not current:  # If we just enabled it
+            # Initialize known pending members
+            pending_members = [member for member in ctx.guild.members if member.pending]
+            self.known_pending[ctx.guild.id] = {member.id for member in pending_members}
+            self.add_log(ctx.guild.id, f"Monitoring enabled. Found {len(pending_members)} existing pending members.")
     
     @appmonitor.command()
     async def debug(self, ctx):
@@ -88,6 +201,44 @@ class ApplicationMonitor(commands.Cog):
         await self.config.guild(ctx.guild).debug.set(not current)
         status = "enabled" if not current else "disabled"
         await ctx.send(f"Debug mode has been {status}.")
+    
+    @appmonitor.command()
+    async def pending(self, ctx):
+        """Show current pending members."""
+        pending_members = [member for member in ctx.guild.members if member.pending]
+        
+        if not pending_members:
+            await ctx.send("No pending members found.")
+            return
+        
+        embed = discord.Embed(
+            title="📋 Current Pending Members",
+            color=discord.Color.orange(),
+            timestamp=datetime.utcnow()
+        )
+        
+        for i, member in enumerate(pending_members[:25], 1):  # Limit to 25 for embed limits
+            embed.add_field(
+                name=f"{i}. {member}",
+                value=f"ID: {member.id}\nJoined: {member.joined_at.strftime('%Y-%m-%d %H:%M:%S') if member.joined_at else 'Unknown'}",
+                inline=True
+            )
+        
+        if len(pending_members) > 25:
+            embed.set_footer(text=f"Showing first 25 of {len(pending_members)} pending members")
+        
+        await ctx.send(embed=embed)
+    
+    @appmonitor.command()
+    async def forcescan(self, ctx):
+        """Force scan for pending members now."""
+        await ctx.send("🔍 Scanning for pending members...")
+        
+        try:
+            await self.check_pending_members(ctx.guild)
+            await ctx.send("✅ Scan completed. Check logs for details.")
+        except Exception as e:
+            await ctx.send(f"❌ Error during scan: {e}")
     
     @appmonitor.command()
     async def test(self, ctx):
@@ -122,12 +273,13 @@ class ApplicationMonitor(commands.Cog):
         try:
             await channel.send(f"{role.mention} - Test notification!", embed=embed)
             await ctx.send(f"✅ Test notification sent to {channel.mention}")
+            self.add_log(ctx.guild.id, f"Test notification sent successfully to {channel.name}")
         except discord.Forbidden:
             await ctx.send(f"❌ Missing permissions to send message in {channel.mention}")
-    @appmonitor.command()
-    async def settings(self, ctx):
-        """Show current application monitoring settings."""
-        await self.show_settings(ctx)
+            self.add_log(ctx.guild.id, f"Missing permissions to send message in {channel.name}", "ERROR")
+        except Exception as e:
+            await ctx.send(f"❌ Error sending test notification: {e}")
+            self.add_log(ctx.guild.id, f"Error sending test notification: {e}", "ERROR")
     
     @appmonitor.command()
     async def logs(self, ctx, lines: int = 20):
@@ -185,6 +337,11 @@ class ApplicationMonitor(commands.Cog):
         else:
             await ctx.send("No logs to clear for this server.")
     
+    @appmonitor.command()
+    async def settings(self, ctx):
+        """Show current application monitoring settings."""
+        await self.show_settings(ctx)
+    
     async def show_settings(self, ctx):
         """Display current settings for the guild."""
         guild_config = await self.config.guild(ctx.guild).all()
@@ -197,8 +354,8 @@ class ApplicationMonitor(commands.Cog):
         channel = ctx.guild.get_channel(channel_id) if channel_id else None
         role = ctx.guild.get_role(role_id) if role_id else None
         
-        # Check membership screening
-        has_screening = hasattr(ctx.guild, 'rules_channel') and ctx.guild.rules_channel is not None
+        # Check server access settings
+        pending_members = [member for member in ctx.guild.members if member.pending]
         
         settings_text = f"""
         Application Monitor Settings for {ctx.guild.name}
@@ -209,101 +366,25 @@ class ApplicationMonitor(commands.Cog):
         Notification Role: {role.mention if role else 'Not Set'}
         
         Server Info:
-        Membership Screening: {'Enabled' if has_screening else 'Disabled'}
-        Rules Channel: {ctx.guild.rules_channel.mention if ctx.guild.rules_channel else 'Not Set'}
+        Current Pending Members: {len(pending_members)}
+        Monitoring Method: Periodic Scanning (every 60s)
+        Known Pending: {len(self.known_pending.get(ctx.guild.id, set()))}
         """
         
         await ctx.send(box(settings_text, lang="yaml"))
     
     @commands.Cog.listener()
-    async def on_member_join(self, member):
-        """Triggered when a member joins the server."""
-        guild_config = await self.config.guild(member.guild).all()
-        debug = guild_config["debug"]
-        
-        self.add_log(member.guild.id, f"Member join event: {member} ({member.id})")
-        
-        if debug:
-            self.add_log(member.guild.id, f"Member pending: {member.pending}")
-            self.add_log(member.guild.id, f"Guild has rules channel: {member.guild.rules_channel is not None}")
-        
-        # Check if monitoring is enabled for this guild
-        if not guild_config["enabled"]:
-            self.add_log(member.guild.id, f"Monitoring disabled - skipping notification")
-            return
-        
-        # For servers with membership screening, we want to catch pending members
-        # For servers without screening, we catch all joins
-        should_notify = False
-        
-        if member.guild.rules_channel:
-            # Server has membership screening - notify for pending members
-            should_notify = member.pending
-            self.add_log(member.guild.id, f"Server has screening, member pending: {member.pending}, will notify: {should_notify}")
-        else:
-            # Server doesn't have screening - notify for all joins
-            should_notify = True
-            self.add_log(member.guild.id, f"Server has no screening, notifying for all joins")
-        
-        if not should_notify:
-            self.add_log(member.guild.id, f"Not notifying for {member} - should_notify: {should_notify}")
-            return
-            
-        # Get configuration
-        channel_id = guild_config["notification_channel"]
-        role_id = guild_config["notification_role"]
-        
-        if not channel_id or not role_id:
-            self.add_log(member.guild.id, f"Application monitor not fully configured (channel: {channel_id}, role: {role_id})", "WARNING")
-            return
-            
-        channel = member.guild.get_channel(channel_id)
-        role = member.guild.get_role(role_id)
-        
-        if not channel or not role:
-            self.add_log(member.guild.id, f"Invalid channel or role configuration (channel exists: {channel is not None}, role exists: {role is not None})", "WARNING")
-            return
-        
-        # Create notification message
-        title = "New Membership Application" if member.pending else "New Member Joined"
-        description = f"**{member.mention}** has {'applied to join' if member.pending else 'joined'} the server."
-        
-        embed = discord.Embed(
-            title=title,
-            description=description,
-            color=discord.Color.blue(),
-            timestamp=member.joined_at
-        )
-        
-        embed.add_field(name="User", value=f"{member} ({member.id})", inline=True)
-        embed.add_field(name="Account Created", value=member.created_at.strftime("%Y-%m-%d %H:%M:%S"), inline=True)
-        embed.add_field(name="Joined At", value=member.joined_at.strftime("%Y-%m-%d %H:%M:%S"), inline=True)
-        
-        if member.pending:
-            embed.add_field(name="Status", value="Pending Approval", inline=True)
-        
-        if member.avatar:
-            embed.set_thumbnail(url=member.avatar.url)
-        
-        # Send notification with role mention
-        try:
-            message_text = f"{role.mention} - {'New application received!' if member.pending else 'New member joined!'}"
-            await channel.send(message_text, embed=embed)
-            self.add_log(member.guild.id, f"Sent {'application' if member.pending else 'join'} notification for {member} to {channel.name}")
-        except discord.Forbidden:
-            self.add_log(member.guild.id, f"Missing permissions to send message in {channel.name}", "ERROR")
-        except Exception as e:
-            self.add_log(member.guild.id, f"Error sending notification: {e}", "ERROR")
-    
-    @commands.Cog.listener()
     async def on_member_update(self, before, after):
         """Triggered when a member's status changes (including passing screening)."""
         guild_config = await self.config.guild(after.guild).all()
-        debug = guild_config["debug"]
         
         # Check if this is a membership screening completion
         if before.pending and not after.pending:
             self.add_log(after.guild.id, f"Member screening completed: {after} ({after.id})")
+            
+            # Remove from known pending
+            if after.guild.id in self.known_pending:
+                self.known_pending[after.guild.id].discard(after.id)
             
             # Check if monitoring is enabled
             if not guild_config["enabled"]:
@@ -327,14 +408,14 @@ class ApplicationMonitor(commands.Cog):
                 
             # Create approval notification
             embed = discord.Embed(
-                title="Application Approved",
+                title="✅ Application Approved",
                 description=f"**{after.mention}** has completed membership screening and joined the server!",
                 color=discord.Color.green(),
                 timestamp=discord.utils.utcnow()
             )
             
             embed.add_field(name="User", value=f"{after} ({after.id})", inline=True)
-            embed.add_field(name="Originally Joined", value=after.joined_at.strftime("%Y-%m-%d %H:%M:%S"), inline=True)
+            embed.add_field(name="Originally Joined", value=after.joined_at.strftime("%Y-%m-%d %H:%M:%S") if after.joined_at else "Unknown", inline=True)
             
             if after.avatar:
                 embed.set_thumbnail(url=after.avatar.url)
