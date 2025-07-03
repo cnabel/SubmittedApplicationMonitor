@@ -1,6 +1,6 @@
 {
     "author": [
-        "YourUsername"
+        "Nabel"
     ],
     "name": "ApplicationMonitor",
     "description": "Monitor membership applications and notify specified roles when users apply to join the server. Tracks both initial applications and screening completion.",
