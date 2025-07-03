@@ -1,0 +1,18 @@
+{
+    "author": [
+        "Nabel"
+    ],
+    "install_msg": "Thanks for installing SubmittedApplicationMonitor! Use `[p]load applicationmonitor` to load the Application Monitor cog.",
+    "name": "SubmittedApplicationMonitor",
+    "description": "Monitor membership applications and notify specified roles when users apply to join Discord servers.",
+    "short": "Application monitoring and notifications for Discord servers",
+    "tags": [
+        "discord",
+        "red",
+        "cogs",
+        "moderation",
+        "applications",
+        "notifications",
+        "membership"
+    ]
+}
