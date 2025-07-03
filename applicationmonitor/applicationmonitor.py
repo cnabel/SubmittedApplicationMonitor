@@ -186,13 +186,19 @@ class ApplicationMonitor(commands.Cog):
         current = await self.config.guild(ctx.guild).enabled()
         await self.config.guild(ctx.guild).enabled.set(not current)
         status = "enabled" if not current else "disabled"
-        await ctx.send(f"Application monitoring has been {status}.")
         
         if not current:  # If we just enabled it
-            # Initialize known pending members
+            # Initialize known pending members (mark existing ones as already known)
             pending_members = [member for member in ctx.guild.members if member.pending]
             self.known_pending[ctx.guild.id] = {member.id for member in pending_members}
-            self.add_log(ctx.guild.id, f"Monitoring enabled. Found {len(pending_members)} existing pending members.")
+            self.add_log(ctx.guild.id, f"Monitoring enabled. Marked {len(pending_members)} existing pending members as known (won't notify for these).")
+            await ctx.send(f"Application monitoring has been {status}.\n✅ Found {len(pending_members)} existing pending members - these won't trigger notifications.\n🔔 Only **new** applications from now on will send notifications.")
+        else:
+            # Clear known pending when disabling
+            if ctx.guild.id in self.known_pending:
+                del self.known_pending[ctx.guild.id]
+            self.add_log(ctx.guild.id, f"Monitoring disabled. Cleared known pending members.")
+            await ctx.send(f"Application monitoring has been {status}.")
     
     @appmonitor.command()
     async def debug(self, ctx):
@@ -229,6 +235,12 @@ class ApplicationMonitor(commands.Cog):
         
         await ctx.send(embed=embed)
     
+    @appmonitor.command()
+    async def reset(self, ctx):
+        """Reset the known pending members list (useful if you got wrong notifications)."""
+        pending_members = [member for member in ctx.guild.members if member.pending]
+        self.known_pending[ctx.guild.id] = {member.id for member in pending_members}
+        self.add_log(ctx.guild.id, f"Reset known pending members. Marked {len(pending_members)} current pending members as known.")
     @appmonitor.command()
     async def forcescan(self, ctx):
         """Force scan for pending members now."""
